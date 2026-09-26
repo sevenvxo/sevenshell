@@ -7,7 +7,9 @@ set -eu
 user="${SUDO_USER:?Run it with sudo from your own account.}"
 home=$(getent passwd "$user" | cut -d: -f6)
 here=$(cd "$(dirname "$0")" && pwd)
-sevenwm_repo="$home/Projects/sevenwm"
+# sevenwm sits next to sevenshell unless SEVENWM_REPO says otherwise
+sevenwm_repo="${SEVENWM_REPO:-$(cd "$here/../../.." && pwd)/sevenwm}"
+[ -d "$sevenwm_repo" ] || sevenwm_repo="$home/Projects/sevenwm"
 
 command -v greetd >/dev/null || { echo "greetd isn't installed: sudo pacman -S greetd"; exit 1; }
 getent passwd greeter >/dev/null || { echo "There's no 'greeter' account (greetd's package makes it)."; exit 1; }
