@@ -1,0 +1,8 @@
+# greetd config for sevenshells login screen put here by install.sh maybe
+
+[terminal]
+vt = 1
+
+[default_session]
+command = "env XDG_CONFIG_HOME=/etc/sevenwm-greeter XDG_CACHE_HOME=/var/cache/sevenwm-greeter /usr/local/lib/sevenwm-greeter/sevenwm --greeter '/usr/local/lib/sevenwm-greeter/sevenshell greeter'"
+user = "greeter"

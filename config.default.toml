@@ -1,0 +1,53 @@
+# sevenshell config at ~/.config/sevenshell/config.toml
+# anything u leave out keeps the value here and changes apply within a sec
+
+[bar]
+# modules in order are desktop clock audio network perf power battery title and minimap
+left = ["desktop"]
+center = []
+right = ["clock", "audio", "network", "perf", "power"]
+# strftime style like glib does it
+clock_format = "%H:%M %m/%d/%y"
+# what the desktop button starts
+terminal = "kitty"
+# the dropdown trays from clicking audio network perf and power
+tray = "~/.config/waybar/scripts/tray.py"
+
+[notifications]
+# only critical notifications pop up and the rest go to history
+do_not_disturb = false
+# how long a popup stays in ms when the app doesnt say
+timeout = 5000
+# which edges they sit on like top-left top top-right left center right bottom-left bottom or bottom-right
+position = "top-right"
+# and how far from them in px and the top edge is the bottom of the bar
+margin_x = 8
+margin_y = 8
+# each notification size in px and height 0 fits the text
+width = 360
+height = 0
+# how many old notifications to keep
+history = 50
+
+[osd]
+# how much one volume or brightness key press changes in percent
+step = 5
+# how long the box stays after the last change in ms
+duration = 1500
+# top or bottom
+position = "bottom"
+# the highest the volume keys go in percent
+max_volume = 150
+
+[lock]
+# the lock screen picture or empty for black
+wallpaper = ""
+# ur picture on the password prompt and empty looks in ~/.face and the usual spots
+avatar = ""
+# strftime style like glib does it
+clock_format = "%H:%M"
+date_format = "%A, %B %d, %Y"
+# the hint at the bottom left or empty for none
+message = "Press any key"
+# lock whenever the computer goes to sleep
+lock_before_sleep = true
