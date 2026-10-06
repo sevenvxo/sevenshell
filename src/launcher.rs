@@ -6,40 +6,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{gdk, gio, glib};
-use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+use gtk4::{gdk, gio};
 
-const VISIBLE_ROWS: usize = 8;
+use crate::picker::{Look, Picker, Row, Source, is_subsequence};
 
-pub const CSS: &str = "
-.launcher { background: transparent; }
-.launcher * {
-    font-family: \"Adwaita Sans\", \"Symbols Nerd Font\", sans-serif;
-    font-size: 14px;
-    color: #ffffff;
-}
-.launcher .panel {
-    background: #000000;
-    border: 1px solid #ffffff;
-    border-radius: 7px;
-    padding: 14px;
-}
-.launcher .search-icon { font-family: \"Symbols Nerd Font\"; font-size: 15px; margin: 0 8px 0 4px; }
-.launcher entry {
-    background: #000000; border: none; box-shadow: none; outline: none;
-    padding: 4px 0; caret-color: #ffffff; min-height: 0;
-}
-.launcher entry selection { background: #ffffff; color: #000000; }
-.launcher .divider { background: #ffffff; min-height: 1px; margin: 10px 0 8px 0; }
-.launcher .row {
-    border: 1px solid #000000; border-radius: 4px;
-    padding: 6px 10px;
-}
-.launcher .row:hover { border: 1px dashed #ffffff; }
-.launcher .row.selected { border: 1px solid #ffffff; }
-.launcher .empty { padding: 6px 10px; }
-.launcher .count { font-size: 12px; }
-";
+pub type Launcher = Picker<Apps>;
 
 struct App {
     info: gio::AppInfo,
@@ -49,23 +20,23 @@ struct App {
     extra: String,
 }
 
-struct Row {
-    frame: gtk4::Box,
-    icon: gtk4::Image,
-    name: gtk4::Label,
-}
-
-pub struct Launcher {
-    pub window: gtk4::ApplicationWindow,
-    entry: gtk4::Entry,
-    count: gtk4::Label,
-    empty: gtk4::Label,
-    rows: Vec<Row>,
+pub struct Apps {
     apps: Vec<App>,
     history: RefCell<HashMap<String, u64>>,
-    results: RefCell<Vec<usize>>,
-    selected: RefCell<usize>,
-    offset: RefCell<usize>,
+    /// what was typed w its case kept for commands
+    raw: RefCell<String>,
+    /// the extra rows after the apps for this query
+    extras: RefCell<Vec<Extra>>,
+}
+
+/// rows that arent apps like an answer a command or a web search
+enum Extra {
+    /// the math and its answer
+    Answer(String),
+    /// > command runs in a shell
+    Run(String),
+    /// search the web for this
+    Web(String),
 }
 
 fn history_path() -> PathBuf {
@@ -91,11 +62,6 @@ fn save_history(history: &HashMap<String, u64>) {
     if let Ok(text) = serde_json::to_string(history) {
         let _ = std::fs::write(path, text);
     }
-}
-
-fn is_subsequence(query: &str, text: &str) -> bool {
-    let mut chars = text.chars();
-    query.chars().all(|q| chars.any(|c| c == q))
 }
 
 /// higher is a better match and none is no match
@@ -153,138 +119,132 @@ fn installed_apps() -> Vec<App> {
 
 impl Launcher {
     pub fn new(app: &gtk4::Application) -> Rc<Self> {
-        let window = gtk4::ApplicationWindow::new(app);
-        window.init_layer_shell();
-        window.set_namespace(Some("launcher"));
-        window.set_layer(Layer::Overlay);
-        window.set_keyboard_mode(KeyboardMode::Exclusive);
-        window.add_css_class("launcher");
-
-        let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        panel.add_css_class("panel");
-        panel.set_size_request(460, -1);
-
-        let search = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        let icon = gtk4::Label::new(Some("\u{f0349}"));
-        icon.add_css_class("search-icon");
-        let entry = gtk4::Entry::new();
-        entry.set_has_frame(false);
-        entry.set_hexpand(true);
-        let count = gtk4::Label::new(None);
-        count.add_css_class("count");
-        search.append(&icon);
-        search.append(&entry);
-        search.append(&count);
-        panel.append(&search);
-
-        let divider = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        divider.add_css_class("divider");
-        panel.append(&divider);
-
-        let mut rows = Vec::new();
-        for _ in 0..VISIBLE_ROWS {
-            let frame = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-            frame.add_css_class("row");
-            frame.set_margin_top(1);
-            frame.set_margin_bottom(1);
-            let icon = gtk4::Image::new();
-            icon.set_pixel_size(24);
-            let name = gtk4::Label::new(None);
-            name.set_xalign(0.0);
-            name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            name.set_hexpand(true);
-            frame.append(&icon);
-            frame.append(&name);
-            panel.append(&frame);
-            rows.push(Row { frame, icon, name });
-        }
-        let empty = gtk4::Label::new(Some("No matches"));
-        empty.set_xalign(0.0);
-        empty.add_css_class("empty");
-        empty.set_visible(false);
-        panel.append(&empty);
-        window.set_child(Some(&panel));
-
-        let launcher = Rc::new(Self {
-            window,
-            entry,
-            count,
-            empty,
-            rows,
+        let look = Look {
+            namespace: "launcher",
+            width: 460,
+            placeholder: None,
+            empty: "No matches",
+            detail: false,
+            hint: None,
+        };
+        let apps = Apps {
             apps: installed_apps(),
             history: RefCell::new(load_history()),
-            results: RefCell::new(Vec::new()),
-            selected: RefCell::new(0),
-            offset: RefCell::new(0),
-        });
-        launcher.connect();
-        launcher.search();
-        launcher
+            raw: RefCell::default(),
+            extras: RefCell::default(),
+        };
+        Picker::build(app, look, apps)
+    }
+}
+
+impl Source for Apps {
+    fn len(&self) -> usize {
+        self.apps.len()
     }
 
-    fn connect(self: &Rc<Self>) {
-        let this = Rc::downgrade(self);
-        self.entry.connect_changed(move |_| {
-            if let Some(this) = this.upgrade() {
-                this.search();
-            }
-        });
-        let this = Rc::downgrade(self);
-        self.entry.connect_activate(move |_| {
-            if let Some(this) = this.upgrade() {
-                this.launch_selected();
-            }
-        });
+    fn typed(&self, raw: &str) {
+        *self.raw.borrow_mut() = raw.to_string();
+    }
 
-        let keys = gtk4::EventControllerKey::new();
-        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        let this = Rc::downgrade(self);
-        keys.connect_key_pressed(move |_, key, _, modifiers| {
-            let Some(this) = this.upgrade() else {
-                return glib::Propagation::Proceed;
-            };
-            let ctrl = modifiers.contains(gdk::ModifierType::CONTROL_MASK);
-            match key {
-                gdk::Key::Escape => this.window.close(),
-                gdk::Key::Down | gdk::Key::Tab => this.step(1),
-                gdk::Key::j if ctrl => this.step(1),
-                gdk::Key::Up | gdk::Key::ISO_Left_Tab => this.step(-1),
-                gdk::Key::k if ctrl => this.step(-1),
-                gdk::Key::Page_Down => this.step(VISIBLE_ROWS as i64),
-                gdk::Key::Page_Up => this.step(-(VISIBLE_ROWS as i64)),
-                _ => return glib::Propagation::Proceed,
+    fn rank(&self, query: &str) -> Vec<usize> {
+        let raw = self.raw.borrow().clone();
+        let mut extras = Vec::new();
+        let launcher = &crate::config::get().launcher;
+        if let Some(command) = raw.strip_prefix('>') {
+            // only the command so apps dont get in the way
+            if !command.trim().is_empty() {
+                extras.push(Extra::Run(command.trim().to_string()));
             }
-            glib::Propagation::Stop
-        });
-        self.window.add_controller(keys);
-
-        for (i, row) in self.rows.iter().enumerate() {
-            let click = gtk4::GestureClick::new();
-            let this = Rc::downgrade(self);
-            click.connect_released(move |_, _, _, _| {
-                if let Some(this) = this.upgrade() {
-                    *this.selected.borrow_mut() = *this.offset.borrow() + i;
-                    this.launch_selected();
-                }
-            });
-            row.frame.add_controller(click);
-            let scroll =
-                gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
-            let this = Rc::downgrade(self);
-            scroll.connect_scroll(move |_, _, dy| {
-                if let Some(this) = this.upgrade()
-                    && dy != 0.0
-                {
-                    this.step(if dy > 0.0 { 1 } else { -1 });
-                }
-                glib::Propagation::Stop
-            });
-            row.frame.add_controller(scroll);
+            let rows = if extras.is_empty() { vec![] } else { vec![self.apps.len()] };
+            *self.extras.borrow_mut() = extras;
+            return rows;
         }
+        let math = raw.strip_prefix('=').unwrap_or(&raw);
+        if launcher.calculator
+            && crate::calc::looks_like_math(&raw)
+            && let Some(answer) = crate::calc::eval(math)
+        {
+            extras.push(Extra::Answer(crate::calc::show(answer)));
+        }
+        let answer_first = !extras.is_empty();
+        let mut ranked = self.rank_apps(query);
+        if !query.is_empty() && !launcher.search_url.is_empty() {
+            extras.push(Extra::Web(raw.clone()));
+        }
+        let first = self.apps.len();
+        let count = extras.len();
+        *self.extras.borrow_mut() = extras;
+        // an answer goes on top and the web search at the bottom
+        if answer_first {
+            ranked.insert(0, first);
+            ranked.extend((first + 1)..(first + count));
+        } else {
+            ranked.extend(first..(first + count));
+        }
+        ranked
     }
 
-    fn search(&self) {
-        let query = self.entry.text().trim().to_lowercase();
+    fn fill(&self, index: usize, row: &Row) {
+        if index >= self.apps.len() {
+            let extras = self.extras.borrow();
+            let Some(extra) = extras.get(index - self.apps.len()) else {
+                return;
+            };
+            row.icon.set_visible(false);
+            row.glyph.set_visible(true);
+            row.glyph.add_css_class("icon");
+            let (glyph, text) = match extra {
+                Extra::Answer(answer) => ("calculate", format!("= {answer}")),
+                Extra::Run(command) => ("terminal", format!("Run {command}")),
+                Extra::Web(query) => ("travel_explore", format!("Search the web for \u{201c}{query}\u{201d}")),
+            };
+            row.glyph.set_text(glyph);
+            row.name.set_text(&text);
+            return;
+        }
+        row.icon.set_visible(true);
+        row.glyph.set_visible(false);
+        self.fill_app(index, row);
+    }
+
+    fn pick(&self, index: usize, window: &gtk4::ApplicationWindow) {
+        if index >= self.apps.len() {
+            if let Some(extra) = self.extras.borrow().get(index - self.apps.len()) {
+                match extra {
+                    Extra::Answer(answer) => {
+                        let mut copy = std::process::Command::new("wl-copy");
+                        copy.arg(answer);
+                        crate::run_detached(&mut copy);
+                    }
+                    Extra::Run(command) => {
+                        crate::run_detached(std::process::Command::new("sh").args(["-c", command]));
+                    }
+                    Extra::Web(query) => {
+                        let url = crate::config::get().launcher.search_url.replace("%s", &encode(query));
+                        crate::run_detached(std::process::Command::new("xdg-open").arg(url));
+                    }
+                }
+            }
+            window.close();
+            return;
+        }
+        self.pick_app(index, window);
+    }
+}
+
+/// the query made safe for a url
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b' ' => "+".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+impl Apps {
+    fn rank_apps(&self, query: &str) -> Vec<usize> {
         let history = self.history.borrow();
         let uses = |app: &App| history.get(&app.id).copied().unwrap_or(0);
         let mut ranked: Vec<(u64, usize)> = if query.is_empty() {
@@ -295,7 +255,7 @@ impl Launcher {
             (0..self.apps.len())
                 .filter_map(|i| {
                     let app = &self.apps[i];
-                    score(&query, app).map(|s| (s + uses(app).min(20), i))
+                    score(query, app).map(|s| (s + uses(app).min(20), i))
                 })
                 .collect()
         };
@@ -303,61 +263,19 @@ impl Launcher {
             b.0.cmp(&a.0)
                 .then_with(|| self.apps[a.1].name.cmp(&self.apps[b.1].name))
         });
-        *self.results.borrow_mut() = ranked.into_iter().map(|(_, i)| i).collect();
-        *self.selected.borrow_mut() = 0;
-        *self.offset.borrow_mut() = 0;
-        drop(history);
-        self.render();
+        ranked.into_iter().map(|(_, i)| i).collect()
     }
 
-    fn render(&self) {
-        let results = self.results.borrow();
-        let (selected, offset) = (*self.selected.borrow(), *self.offset.borrow());
-        for (i, row) in self.rows.iter().enumerate() {
-            match results.get(offset + i) {
-                Some(&index) => {
-                    let info = &self.apps[index].info;
-                    row.name.set_text(&info.display_name());
-                    match info.icon() {
-                        Some(icon) => row.icon.set_from_gicon(&icon),
-                        None => row.icon.set_icon_name(Some("application-x-executable")),
-                    }
-                    if offset + i == selected {
-                        row.frame.add_css_class("selected");
-                    } else {
-                        row.frame.remove_css_class("selected");
-                    }
-                    row.frame.set_visible(true);
-                }
-                None => row.frame.set_visible(false),
-            }
+    fn fill_app(&self, index: usize, row: &Row) {
+        let info = &self.apps[index].info;
+        row.name.set_text(&info.display_name());
+        match info.icon() {
+            Some(icon) => row.icon.set_from_gicon(&icon),
+            None => row.icon.set_icon_name(Some("application-x-executable")),
         }
-        self.empty.set_visible(results.is_empty());
-        self.count
-            .set_text(&format!("{}/{}", results.len(), self.apps.len()));
     }
 
-    fn step(&self, delta: i64) {
-        let len = self.results.borrow().len();
-        if len == 0 {
-            return;
-        }
-        let selected = (*self.selected.borrow() as i64 + delta).clamp(0, len as i64 - 1) as usize;
-        let mut offset = *self.offset.borrow();
-        if selected < offset {
-            offset = selected;
-        } else if selected >= offset + VISIBLE_ROWS {
-            offset = selected + 1 - VISIBLE_ROWS;
-        }
-        *self.selected.borrow_mut() = selected;
-        *self.offset.borrow_mut() = offset;
-        self.render();
-    }
-
-    fn launch_selected(&self) {
-        let Some(&index) = self.results.borrow().get(*self.selected.borrow()) else {
-            return;
-        };
+    fn pick_app(&self, index: usize, window: &gtk4::ApplicationWindow) {
         let app = &self.apps[index];
         {
             let mut history = self.history.borrow_mut();
@@ -368,11 +286,6 @@ impl Launcher {
         if let Err(err) = app.info.launch(&[], context.as_ref()) {
             eprintln!("sevenshell: launching {}: {err}", app.id);
         }
-        self.window.close();
-    }
-
-    pub fn show(&self) {
-        self.window.present();
-        self.entry.grab_focus();
+        window.close();
     }
 }

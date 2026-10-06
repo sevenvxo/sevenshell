@@ -38,6 +38,13 @@ if [ -f "$home/.config/sevenshell/config.toml" ]; then
     esac
 fi
 
+# the fonts too bc the greeter account cant see the ones in ur home
+if [ -d "$home/.local/share/fonts/sevenshell" ]; then
+    install -d /usr/local/share/fonts/sevenshell
+    install -m644 "$home"/.local/share/fonts/sevenshell/*.ttf /usr/local/share/fonts/sevenshell/
+    fc-cache -f /usr/local/share/fonts/sevenshell >/dev/null
+fi
+
 # where it remembers the last user and session
 install -d -o greeter -g greeter /var/cache/sevenwm-greeter
 

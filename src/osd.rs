@@ -14,18 +14,13 @@ use crate::status;
 
 pub const CSS: &str = "
 .osd { background: transparent; }
-.osd .box {
-    background: #000000;
-    border: 1px solid #ffffff;
-    border-radius: 7px;
-    padding: 10px 16px;
-}
-.osd * { color: #ffffff; font-family: \"Symbols Nerd Font\", sans-serif; font-size: 13px; }
-.osd .icon { font-size: 18px; min-width: 22px; }
-.osd .value { min-width: 34px; }
-.osd progressbar trough { background: #333333; border: none; border-radius: 3px; min-height: 6px; }
-.osd progressbar progress { background: #ffffff; border: none; border-radius: 3px; min-height: 6px; }
-.osd progressbar.muted progress { background: #777777; }
+.osd .box { background: @m3surface; border-radius: 9999px; padding: 10px 20px 10px 16px; }
+.osd * { color: @m3onSurface; font-size: 13px; font-weight: 500; }
+.osd .icon { font-size: 22px; min-width: 24px; color: @m3primary; }
+.osd .value { min-width: 38px; color: @m3onSurfaceVariant; }
+.osd progressbar trough { background: @m3surfaceContainerHighest; border: none; border-radius: 9999px; min-height: 10px; }
+.osd progressbar progress { background: @m3primary; border: none; border-radius: 9999px; min-height: 10px; }
+.osd progressbar.muted progress { background: @m3outline; }
 ";
 
 pub struct Osd {
@@ -45,6 +40,7 @@ impl Osd {
         window.set_layer(Layer::Overlay);
         window.set_keyboard_mode(KeyboardMode::None);
         window.add_css_class("osd");
+        crate::style::adopt(&window);
         // clicks go thru to whatever is under it
         window.set_can_target(false);
 
@@ -184,18 +180,18 @@ pub fn apply(what: &str, how: Option<&str>, step: i32, max: u32) -> Option<Readi
         "volume" => {
             let v = status::volume()?;
             let icon = match v.percent {
-                _ if v.muted => "󰝟",
-                0..=33 => "󰕿",
-                34..=66 => "󰖀",
-                _ => "󰕾",
+                _ if v.muted => "volume_off",
+                0..=33 => "volume_mute",
+                34..=66 => "volume_down",
+                _ => "volume_up",
             };
             Some(Reading { icon, percent: v.percent, muted: v.muted })
         }
         "mic" => {
             let v = status::mic()?;
-            let icon = if v.muted { "󰍭" } else { "󰍬" };
+            let icon = if v.muted { "mic_off" } else { "mic" };
             Some(Reading { icon, percent: v.percent, muted: v.muted })
         }
-        _ => Some(Reading { icon: "󰃠", percent: brightness()?, muted: false }),
+        _ => Some(Reading { icon: "brightness_6", percent: brightness()?, muted: false }),
     }
 }

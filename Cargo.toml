@@ -1,14 +1,20 @@
 [package]
 name = "sevenshell"
-version = "0.1.1"
+version = "0.2.0"
 license = "BSD-3-Clause"
 edition = "2024"
 
 [dependencies]
+emojis = "0.9.0"
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false }
+gio = { version = "0.22", features = ["v2_80"] }
 gio-unix = "0.22"
 gtk4 = { version = "0.11.5", features = ["v4_12"] }
 gtk4-layer-shell = "0.8.1"
 gtk4-session-lock = { version = "0.4.1", features = ["v1_2"] }
+libc = "0.2.189"
+material-colors = { version = "0.4.2", features = ["image"] }
 pam-client = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

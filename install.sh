@@ -37,8 +37,10 @@ say "installing packages"
 packages="base-devel git pkgconf clang seatd libinput libxkbcommon mesa libdrm systemd-libs wayland fontconfig
     gtk4 gtk4-layer-shell pam
     xwayland-satellite pipewire-pulse wireplumber brightnessctl networkmanager bluez bluez-utils power-profiles-daemon
-    grim slurp wl-clipboard zenity xdg-desktop-portal-wlr xdg-desktop-portal-gtk libnotify polkit
-    kitty thunar ttf-nerd-fonts-symbols python-gobject python-cairo gtk3 gtk-layer-shell greetd"
+    grim slurp wl-clipboard zenity satty xdg-desktop-portal-wlr xdg-desktop-portal-gtk libnotify polkit
+    playerctl pavucontrol cava xdg-utils curl cliphist pacman-contrib
+    udisks2 udiskie exfatprogs ntfs-3g dosfstools
+    kitty thunar gvfs tumbler thunar-volman ttf-nerd-fonts-symbols python-gobject python-cairo gtk3 gtk-layer-shell greetd"
 # rustup clashes w the plain rust package so only add it if theres no cargo yet
 command -v cargo >/dev/null || packages="$packages rustup"
 # shellcheck disable=SC2086
@@ -46,6 +48,19 @@ sudo pacman -S --needed --noconfirm $packages
 if command -v rustup >/dev/null && ! rustup show active-toolchain >/dev/null 2>&1; then
     rustup default stable
 fi
+
+# brave isnt in the arch repos so it comes from the aur thru yay or paru and yay gets built first if u have neither
+say "installing brave"
+aur=$(command -v paru || command -v yay || true)
+if [ -z "$aur" ]; then
+    tmp=$(mktemp -d)
+    git clone --depth 1 https://aur.archlinux.org/yay-bin.git "$tmp/yay-bin"
+    (cd "$tmp/yay-bin" && makepkg -si --noconfirm)
+    rm -rf "$tmp"
+    aur=$(command -v yay)
+fi
+pacman -Q brave-bin >/dev/null 2>&1 || pacman -Q brave >/dev/null 2>&1 ||
+    "$aur" -S --needed --noconfirm brave-bin
 
 # sevenwm lives next to sevenshell
 if [ -d "$sevenwm/.git" ]; then
@@ -64,20 +79,33 @@ say "linking them into $bin"
 mkdir -p "$bin"
 ln -sf "$sevenwm/target/release/sevenwm" "$bin/sevenwm"
 ln -sf "$here/target/release/sevenshell" "$bin/sevenshell"
-ln -sf "$sevenwm/settings/sevenwm-settings" "$bin/sevenwm-settings"
+ln -sf "$sevenwm/settings/sevenwm-settings" "$bin/sevenwm-settings"  # js opens sevenshell settings now
 
-# the helper scripts the bar and screenshot key use but never over ur own copies
+# the helper scripts the bar uses plus the old screenshot script but never over ur own copies
 say "installing helper scripts"
 put() { [ -e "$2" ] || install -Dm755 "$1" "$2"; }
-put "$here/resources/scripts/tray.py" "$HOME/.config/waybar/scripts/tray.py"
 put "$here/resources/scripts/perf-status.sh" "$HOME/.config/waybar/scripts/perf-status.sh"
 put "$here/resources/scripts/screenshot.sh" "$HOME/.config/sevenwm/screenshot.sh"
 
-# a first config that does the screenshot thing w the script above
-if [ ! -e "$HOME/.config/sevenwm/config.toml" ]; then
-    sed 's|^command = "grim .*|command = "~/.config/sevenwm/screenshot.sh"|' \
-        "$sevenwm/config.default.toml" > "$HOME/.config/sevenwm/config.toml"
-fi
+# the fonts the look uses which arent in the arch repos so they come from google
+say "installing fonts"
+fonts="$HOME/.local/share/fonts/sevenshell"
+mkdir -p "$fonts"
+font() { [ -s "$fonts/$1" ] || curl -fsSL -o "$fonts/$1" "$2"; }
+font GoogleSansFlex.ttf "https://github.com/google/fonts/raw/main/ofl/googlesansflex/GoogleSansFlex%5BGRAD,ROND,opsz,slnt,wdth,wght%5D.ttf"
+font MaterialSymbolsRounded.ttf "https://github.com/google/material-design-icons/raw/master/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.ttf"
+font Rubik.ttf "https://github.com/google/fonts/raw/main/ofl/rubik/Rubik%5Bwght%5D.ttf"
+fc-cache -f "$fonts" >/dev/null
+
+# brave and thunar become the defaults for anything u havent picked an app for so ur own picks stick
+# checked in mimeapps.list itself bc a marker file could say done when the setting never got saved
+mimeapps="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
+picked() { [ -f "$mimeapps" ] && grep -q "^$1=." "$mimeapps"; }
+say "setting default apps u havent picked"
+for type in x-scheme-handler/http x-scheme-handler/https text/html; do
+    picked "$type" || xdg-mime default brave-browser.desktop "$type"
+done
+picked inode/directory || xdg-mime default thunar.desktop inode/directory
 
 # services the bar and trays talk to
 say "turning on bluetooth and power profiles"

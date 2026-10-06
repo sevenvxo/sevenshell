@@ -12,6 +12,7 @@ use gtk4::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use serde_json::{Value, json};
 
+use crate::auth::Screen;
 use crate::config;
 
 /// back to the clock after this long without typing
@@ -23,24 +24,29 @@ const SESSIONS_DIR: &str = "/usr/share/wayland-sessions";
 pub const CSS: &str = "
 .sevenshell-greeter .switch {
     background: transparent; border: none; box-shadow: none;
-    min-width: 24px; min-height: 24px; padding: 0;
-    font-family: \"Symbols Nerd Font\"; font-size: 14px;
+    min-width: 32px; min-height: 32px; padding: 0; border-radius: 9999px;
 }
-.sevenshell-greeter .switch:hover { background: rgba(255, 255, 255, 0.15); border-radius: 12px; }
+.sevenshell-greeter .switch label { font-size: 22px; color: @m3onSurfaceVariant; }
+.sevenshell-greeter .switch:hover { background: alpha(@m3onSurface, 0.08); }
 .sevenshell-greeter .corner { margin: 24px; }
 .sevenshell-greeter .corner button,
 .sevenshell-greeter .corner dropdown > button {
-    background: rgba(255, 255, 255, 0.15);
-    border: none; box-shadow: none; border-radius: 10px;
-    min-height: 30px; padding: 0 10px;
+    background: alpha(@m3surfaceContainer, 0.92);
+    border: none; box-shadow: none; border-radius: 9999px;
+    min-height: 40px; padding: 0 14px;
 }
 .sevenshell-greeter .corner button:hover,
-.sevenshell-greeter .corner dropdown > button:hover { background: rgba(255, 255, 255, 0.30); }
-.sevenshell-greeter .corner button.power { min-width: 30px; padding: 0; }
-.sevenshell-greeter .corner button.power label { font-family: \"Symbols Nerd Font\"; font-size: 14px; }
-.sevenshell-greeter .corner label { font-size: 12px; }
-.sevenshell-greeter popover contents { background: #000000; border: 1px solid #ffffff; }
-.sevenshell-greeter popover label { color: #ffffff; }
+.sevenshell-greeter .corner dropdown > button:hover { background: @m3secondaryContainer; }
+.sevenshell-greeter .corner button.power { min-width: 40px; padding: 0; }
+.sevenshell-greeter .corner button.power label { font-size: 20px; color: @m3onSurfaceVariant; }
+.sevenshell-greeter .corner label { font-size: 13px; }
+.sevenshell-greeter popover contents {
+    background: @m3surfaceContainer; border: none; border-radius: 16px; padding: 6px;
+}
+.sevenshell-greeter popover label { color: @m3onSurface; }
+.sevenshell-greeter popover row:hover, .sevenshell-greeter popover row:selected {
+    background: @m3secondaryContainer; border-radius: 12px;
+}
 ";
 
 /// someone who can log in
@@ -63,17 +69,11 @@ struct Session {
     id: String,
 }
 
-/// one monitors login window
+/// what one monitors login window has past the shared pages
 struct View {
     window: gtk4::ApplicationWindow,
-    stack: gtk4::Stack,
-    clock: gtk4::Label,
-    date: gtk4::Label,
     avatar: gtk4::Image,
     name: gtk4::Label,
-    entry: gtk4::Entry,
-    button: gtk4::Button,
-    warning: gtk4::Label,
     sessions: gtk4::DropDown,
 }
 
@@ -83,12 +83,8 @@ struct Greeter {
     sessions: Vec<Session>,
     user: Cell<usize>,
     session: Cell<usize>,
+    screen: Rc<Screen>,
     views: RefCell<Vec<View>>,
-    /// the password shared by every monitors box
-    buffer: gtk4::EntryBuffer,
-    checking: Cell<bool>,
-    /// bumped on every key so the back to clock timer only acts if it didnt change
-    typed: Cell<u64>,
 }
 
 /// sevenshell greeter does a thing where it runs the login screen till someone logs in
@@ -100,7 +96,22 @@ pub fn run() -> glib::ExitCode {
         .build();
     app.connect_activate(|app| {
         let css = gtk4::CssProvider::new();
-        css.load_from_string(&format!("{}{}", crate::lock::CSS, CSS));
+        // the login screen cant read ur home so its colors come from the lock wallpaper
+        let config = crate::config::get();
+        let mut theme = config.theme.clone();
+        if theme.wallpaper.is_empty() {
+            theme.wallpaper = config.lock.wallpaper.clone();
+        }
+        let palette = crate::theme::generate(&theme);
+        crate::theme::set_current(&palette);
+        crate::style::match_mode(palette.dark);
+        css.load_from_string(&format!(
+            "{}{}{}{}",
+            palette.css(),
+            crate::style::BASE,
+            crate::auth::CSS,
+            CSS
+        ));
         if let Some(display) = gdk::Display::default() {
             gtk4::style_context_add_provider_for_display(
                 &display,
@@ -128,21 +139,20 @@ impl Greeter {
             .and_then(|r| sessions.iter().position(|s| s.id == r.session))
             .or_else(|| sessions.iter().position(|s| s.id == "sevenwm"))
             .unwrap_or(0);
-        let greeter = Rc::new(Self {
-            app: app.clone(),
-            users,
-            sessions,
-            user: Cell::new(user),
-            session: Cell::new(session),
-            views: RefCell::default(),
-            buffer: gtk4::EntryBuffer::new(None::<&str>),
-            checking: Cell::new(false),
-            typed: Cell::new(0),
-        });
-        let this = Rc::downgrade(&greeter);
-        greeter.buffer.connect_text_notify(move |_| {
-            if let Some(this) = this.upgrade() {
-                this.touched();
+        let greeter = Rc::new_cyclic(|this: &std::rc::Weak<Self>| {
+            let this = this.clone();
+            Self {
+                app: app.clone(),
+                users,
+                sessions,
+                user: Cell::new(user),
+                session: Cell::new(session),
+                screen: Screen::new(LOGIN_TIMEOUT, move || {
+                    if let Some(this) = this.upgrade() {
+                        this.check();
+                    }
+                }),
+                views: RefCell::default(),
             }
         });
         greeter.build_views();
@@ -155,35 +165,33 @@ impl Greeter {
                 }
             });
         }
-        // the clock timer owns the greeter so it lives as long as the program
-        let this = greeter.clone();
-        glib::timeout_add_seconds_local(1, move || {
-            this.tick();
-            glib::ControlFlow::Continue
-        });
         if greeter.sessions.is_empty() {
-            greeter.say(&format!("No sessions found in {SESSIONS_DIR}"), true);
+            greeter.screen.say(&format!("No sessions found in {SESSIONS_DIR}"), true);
         }
         if greeter.users.is_empty() {
-            greeter.say("No one to log in as (no users in /etc/passwd)", true);
+            greeter.screen.say("No one to log in as (no users in /etc/passwd)", true);
         }
         #[cfg(debug_assertions)]
         greeter.debug_hooks();
+        // the app owns the greeter so it lives as long as the program
+        app.connect_shutdown(move |_| {
+            let _ = &greeter;
+        });
     }
 
     /// debug builds only for testing w a fake greetd
     #[cfg(debug_assertions)]
     fn debug_hooks(self: &Rc<Self>) {
         if std::env::var_os("SEVENSHELL_GREETER_PROMPT").is_some() {
-            self.show_login();
+            self.screen.show_login();
         }
         if let Some(password) = std::env::var_os("SEVENSHELL_GREETER_TEST") {
             let this = Rc::downgrade(self);
             let password = password.to_string_lossy().into_owned();
             glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                 if let Some(this) = this.upgrade() {
-                    this.show_login();
-                    this.buffer.set_text(&password);
+                    this.screen.show_login();
+                    this.screen.buffer.set_text(&password);
                     this.check();
                 }
             });
@@ -192,10 +200,11 @@ impl Greeter {
 
     /// a window on every monitor
     fn build_views(self: &Rc<Self>) {
-        let showing_login = !self.showing_clock();
+        let showing_login = !self.screen.showing_clock();
         for view in self.views.borrow_mut().drain(..) {
             view.window.close();
         }
+        self.screen.pages.borrow_mut().clear();
         let Some(display) = gdk::Display::default() else {
             return;
         };
@@ -208,15 +217,12 @@ impl Greeter {
             }
         }
         self.show_user();
-        self.tick();
         if showing_login {
-            self.show_login();
+            self.screen.show_login();
         }
     }
 
     fn view(self: &Rc<Self>, monitor: &gdk::Monitor) -> View {
-        let config = config::get();
-        let lock = &config.lock;
         let window = gtk4::ApplicationWindow::new(&self.app);
         window.init_layer_shell();
         window.set_namespace(Some("greeter"));
@@ -229,101 +235,37 @@ impl Greeter {
         window.set_keyboard_mode(KeyboardMode::Exclusive);
         window.add_css_class("sevenshell-lock");
         window.add_css_class("sevenshell-greeter");
+        crate::style::adopt(&window);
 
-        let overlay = gtk4::Overlay::new();
-        let background = gtk4::Picture::new();
-        background.set_content_fit(gtk4::ContentFit::Cover);
-        background.set_can_shrink(true);
-        if !lock.wallpaper.is_empty() {
-            background.set_filename(Some(crate::lock::expand(&lock.wallpaper)));
-        }
-        overlay.set_child(Some(&background));
-
-        let stack = gtk4::Stack::new();
-        stack.set_transition_type(gtk4::StackTransitionType::Crossfade);
-        stack.set_transition_duration(250);
-
-        // the clock page w time and date on the left
-        let clock_page = gtk4::Overlay::new();
-        let time_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        time_box.set_halign(gtk4::Align::Start);
-        time_box.set_valign(gtk4::Align::Center);
-        time_box.set_margin_start(50);
-        time_box.set_margin_bottom(50);
-        let clock = gtk4::Label::new(None);
-        clock.add_css_class("clock");
-        let date = gtk4::Label::new(None);
-        date.add_css_class("date");
-        time_box.append(&clock);
-        time_box.append(&date);
-        clock_page.set_child(Some(&time_box));
-        if !lock.message.is_empty() {
-            let message = gtk4::Label::new(Some(&lock.message));
-            message.add_css_class("message");
-            message.set_halign(gtk4::Align::Start);
-            message.set_valign(gtk4::Align::End);
-            message.set_margin_start(50);
-            message.set_margin_bottom(80);
-            clock_page.add_overlay(&message);
-        }
-        stack.add_named(&clock_page, Some("clock"));
-
-        // the login page w picture name and password
-        let login = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        login.set_halign(gtk4::Align::Start);
-        login.set_valign(gtk4::Align::Center);
-        login.set_margin_start(50);
         let avatar = gtk4::Image::new();
         avatar.set_pixel_size(120);
         avatar.add_css_class("avatar");
         avatar.set_overflow(gtk4::Overflow::Hidden);
         avatar.set_halign(gtk4::Align::Center);
-        login.append(&avatar);
-        let name_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        name_row.set_halign(gtk4::Align::Center);
         let name = gtk4::Label::new(None);
         name.add_css_class("username");
-        if self.users.len() > 1 {
-            let previous = self.switch_button("\u{f0141}", -1);
-            let next = self.switch_button("\u{f0142}", 1);
-            previous.set_margin_top(10);
-            next.set_margin_top(10);
-            name_row.append(&previous);
-            name_row.append(&name);
-            name_row.append(&next);
-        } else {
-            name_row.append(&name);
+        let overlay = self.screen.build(&window, monitor, 80, |login| {
+            login.append(&avatar);
+            let name_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            name_row.set_halign(gtk4::Align::Center);
+            if self.users.len() > 1 {
+                let previous = self.switch_button("chevron_left", -1);
+                let next = self.switch_button("chevron_right", 1);
+                previous.set_margin_top(10);
+                next.set_margin_top(10);
+                name_row.append(&previous);
+                name_row.append(&name);
+                name_row.append(&next);
+            } else {
+                name_row.append(&name);
+            }
+            login.append(&name_row);
+        });
+        // greetd and pam can say alot so let it wrap
+        if let Some(page) = self.screen.pages.borrow().last() {
+            page.warning.set_wrap(true);
+            page.warning.set_max_width_chars(40);
         }
-        login.append(&name_row);
-
-        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
-        row.set_margin_top(10);
-        row.set_halign(gtk4::Align::Center);
-        let field = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        field.add_css_class("password");
-        field.set_size_request(200, 30);
-        let icon = gtk4::Label::new(Some("\u{f023}"));
-        icon.add_css_class("icon");
-        let entry = gtk4::Entry::with_buffer(&self.buffer);
-        entry.set_visibility(false);
-        entry.set_invisible_char(Some('●'));
-        entry.set_placeholder_text(Some("Password"));
-        entry.set_hexpand(true);
-        field.append(&icon);
-        field.append(&entry);
-        let button = gtk4::Button::with_label("\u{f061}");
-        button.add_css_class("go");
-        row.append(&field);
-        row.append(&button);
-        login.append(&row);
-        let warning = gtk4::Label::new(None);
-        warning.add_css_class("warning");
-        warning.set_wrap(true);
-        warning.set_max_width_chars(40);
-        login.append(&warning);
-        stack.add_named(&login, Some("login"));
-        stack.set_visible_child_name("clock");
-        overlay.add_overlay(&stack);
 
         // bottom corners w the session picker and power
         let names: Vec<&str> = self.sessions.iter().map(|s| s.name.as_str()).collect();
@@ -356,84 +298,33 @@ impl Greeter {
         right.set_halign(gtk4::Align::End);
         right.set_valign(gtk4::Align::End);
         for (icon, tooltip, action) in [
-            ("\u{f04b2}", "Suspend", "suspend"),
-            ("\u{f0709}", "Restart", "reboot"),
-            ("\u{f0425}", "Shut down", "poweroff"),
+            ("bedtime", "Suspend", "suspend"),
+            ("restart_alt", "Restart", "reboot"),
+            ("power_settings_new", "Shut down", "poweroff"),
         ] {
-            let power = gtk4::Button::with_label(icon);
+            let power = gtk4::Button::new();
+            power.set_child(Some(&crate::style::icon(icon)));
             power.add_css_class("power");
             power.set_tooltip_text(Some(tooltip));
             power.connect_clicked(move |_| {
-                if let Err(err) = std::process::Command::new("systemctl").arg(action).spawn() {
-                    eprintln!("sevenshell: systemctl {action}: {err}");
-                }
+                crate::run_detached(std::process::Command::new("systemctl").arg(action));
             });
             right.append(&power);
         }
         overlay.add_overlay(&right);
-        window.set_child(Some(&overlay));
-
-        let this = Rc::downgrade(self);
-        entry.connect_activate(move |_| {
-            if let Some(this) = this.upgrade() {
-                this.check();
-            }
-        });
-        let this = Rc::downgrade(self);
-        button.connect_clicked(move |_| {
-            if let Some(this) = this.upgrade() {
-                this.check();
-            }
-        });
-
-        // on the clock any key or click shows the login and on the login escape prolly goes back
-        let keys = gtk4::EventControllerKey::new();
-        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        let this = Rc::downgrade(self);
-        keys.connect_key_pressed(move |_, key, _, _| {
-            let Some(this) = this.upgrade() else {
-                return glib::Propagation::Proceed;
-            };
-            if this.showing_clock() {
-                this.show_login();
-                return glib::Propagation::Stop;
-            }
-            if key == gdk::Key::Escape {
-                this.show_clock();
-                return glib::Propagation::Stop;
-            }
-            this.touched();
-            glib::Propagation::Proceed
-        });
-        window.add_controller(keys);
-        let click = gtk4::GestureClick::new();
-        let this = Rc::downgrade(self);
-        click.connect_pressed(move |_, _, _, _| {
-            if let Some(this) = this.upgrade()
-                && this.showing_clock()
-            {
-                this.show_login();
-            }
-        });
-        window.add_controller(click);
 
         View {
             window,
-            stack,
-            clock,
-            date,
             avatar,
             name,
-            entry,
-            button,
-            warning,
             sessions,
         }
     }
 
     /// a button that uhhh picks the previous or next user
     fn switch_button(self: &Rc<Self>, icon: &str, step: isize) -> gtk4::Button {
-        let button = gtk4::Button::with_label(icon);
+        let button = gtk4::Button::new();
+        button.set_child(Some(&crate::style::icon(icon)));
         button.add_css_class("switch");
         let this = Rc::downgrade(self);
         button.connect_clicked(move |_| {
@@ -441,8 +332,8 @@ impl Greeter {
                 let n = this.users.len() as isize;
                 let next = (this.user.get() as isize + step).rem_euclid(n);
                 this.user.set(next as usize);
-                this.buffer.set_text("");
-                this.say("", true);
+                this.screen.buffer.set_text("");
+                this.screen.say("", true);
                 this.show_user();
             }
         });
@@ -456,13 +347,8 @@ impl Greeter {
         };
         for view in self.views.borrow().iter() {
             view.name.set_text(&user.display);
-            let scale = view.window.scale_factor().max(1);
-            let texture = avatar(user)
-                .and_then(|path| {
-                    gtk4::gdk_pixbuf::Pixbuf::from_file_at_scale(path, 120 * scale, 120 * scale, false)
-                        .ok()
-                })
-                .map(|pixbuf| gdk::Texture::for_pixbuf(&pixbuf));
+            let texture = crate::auth::avatar(&user.name, &user.home, "")
+                .and_then(|path| crate::auth::avatar_texture(&path, &view.window));
             view.avatar.set_paintable(texture.as_ref());
             view.avatar.set_visible(texture.is_some());
         }
@@ -481,118 +367,60 @@ impl Greeter {
         }
     }
 
-    fn showing_clock(&self) -> bool {
-        self.views
-            .borrow()
-            .first()
-            .is_none_or(|v| v.stack.visible_child_name().as_deref() == Some("clock"))
-    }
-
-    fn show_login(self: &Rc<Self>) {
-        for view in self.views.borrow().iter() {
-            view.stack.set_visible_child_name("login");
-            view.entry.grab_focus();
-        }
-        self.touched();
-    }
-
-    fn show_clock(&self) {
-        if self.checking.get() {
-            return;
-        }
-        self.buffer.set_text("");
-        for view in self.views.borrow().iter() {
-            view.warning.set_text("");
-            view.stack.set_visible_child_name("clock");
-        }
-    }
-
-    /// something got typed so restart the back to clock timer
-    fn touched(self: &Rc<Self>) {
-        let generation = self.typed.get() + 1;
-        self.typed.set(generation);
-        let this = Rc::downgrade(self);
-        glib::timeout_add_local_once(LOGIN_TIMEOUT, move || {
-            if let Some(this) = this.upgrade()
-                && this.typed.get() == generation
-            {
-                this.show_clock();
-            }
-        });
-    }
-
-    fn tick(&self) {
-        let Ok(now) = glib::DateTime::now_local() else {
-            return;
-        };
-        let config = config::get();
-        let time = now.format(&config.lock.clock_format).unwrap_or_default();
-        let date = now.format(&config.lock.date_format).unwrap_or_default();
-        for view in self.views.borrow().iter() {
-            view.clock.set_text(&time);
-            view.date.set_text(&date);
-        }
-    }
-
     /// log in where greetd checks the password off the main thread then starts the session once we quit
     fn check(self: &Rc<Self>) {
-        if self.checking.get() {
-            return;
-        }
-        let password = self.buffer.text().to_string();
         let (Some(user), Some(session)) = (
             self.users.get(self.user.get()).cloned(),
             self.sessions.get(self.session.get()).cloned(),
         ) else {
             return;
         };
-        self.checking.set(true);
-        self.say("Logging in…", false);
         let this = Rc::downgrade(self);
-        glib::spawn_future_local(async move {
-            let (name, start) = (user.name.clone(), session.clone());
-            let result = gio::spawn_blocking(move || login(&name, &password, &start))
-                .await
-                .unwrap_or_else(|_| Err("the login crashed".into()));
-            let Some(this) = this.upgrade() else {
-                return;
-            };
-            this.checking.set(false);
-            match result {
-                Ok(()) => {
-                    Remembered {
-                        user: user.name,
-                        session: session.id,
-                    }
-                    .save();
-                    // greetd starts the session once the greeter exits
-                    if std::env::var_os("SEVENWM_SOCK").is_some() {
-                        crate::ipc::action("quit");
-                    }
+        let (name, start) = (user.name.clone(), session.clone());
+        self.screen.check(
+            "Logging in…",
+            "the login crashed",
+            move |password| login(&name, &password, &start),
+            move || {
+                Remembered {
+                    user: user.name,
+                    session: session.id,
+                }
+                .save();
+                // greetd starts the session once the greeter exits
+                if std::env::var_os("SEVENWM_SOCK").is_some() {
+                    crate::ipc::action("quit");
+                }
+                if let Some(this) = this.upgrade() {
                     this.app.quit();
                 }
-                Err(err) => {
-                    this.buffer.set_text("");
-                    this.say(&err, true);
-                }
-            }
-        });
+            },
+        );
     }
+}
 
-    fn say(&self, text: &str, done: bool) {
-        for view in self.views.borrow().iter() {
-            view.warning.set_text(text);
-            view.entry.set_sensitive(done);
-            view.button.set_sensitive(done);
-            if done {
-                view.entry.grab_focus();
-            }
-        }
-    }
+/// the normal user id range from /etc/login.defs or the usual 1000 to 60000
+fn uid_range() -> std::ops::RangeInclusive<u32> {
+    let defs = std::fs::read_to_string("/etc/login.defs").unwrap_or_default();
+    login_defs_range(&defs)
+}
+
+fn login_defs_range(defs: &str) -> std::ops::RangeInclusive<u32> {
+    let value = |key: &str| {
+        defs.lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| {
+                let mut words = l.split_whitespace();
+                (words.next() == Some(key)).then(|| words.next()?.parse::<u32>().ok()).flatten()
+            })
+    };
+    value("UID_MIN").unwrap_or(1000)..=value("UID_MAX").unwrap_or(60000)
 }
 
 /// people who can log in w a normal user id and a real shell
 fn users() -> Vec<User> {
+    let range = uid_range();
     let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
     let mut users: Vec<User> = passwd
         .lines()
@@ -603,7 +431,7 @@ fn users() -> Vec<User> {
             };
             let uid: u32 = uid.parse().ok()?;
             let real_shell = !shell.ends_with("nologin") && !shell.ends_with("false");
-            if !(1000..60000).contains(&uid) || !real_shell {
+            if !range.contains(&uid) || !real_shell {
                 return None;
             }
             let full = gecos.split(',').next().unwrap_or("").trim();
@@ -673,17 +501,6 @@ fn exec_line(exec: &str) -> String {
         .filter(|word| !(word.len() == 2 && word.starts_with('%')))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// a users uhhh picture from accountsservice sddm or ~/.face
-fn avatar(user: &User) -> Option<PathBuf> {
-    [
-        PathBuf::from(format!("/var/lib/AccountsService/icons/{}", user.name)),
-        PathBuf::from(format!("/usr/share/sddm/faces/{}.face.icon", user.name)),
-        user.home.join(".face"),
-    ]
-    .into_iter()
-    .find(|p| std::fs::File::open(p).is_ok_and(|f| f.metadata().is_ok_and(|m| m.is_file())))
 }
 
 /// the last user and session so the next login starts on them
@@ -849,5 +666,11 @@ mod tests {
         assert!(parse_session("[Desktop Entry]\nName=x\nExec=x\nHidden=true\n", "x".into()).is_none());
         assert!(parse_session("[Desktop Entry]\nName=x\n", "x".into()).is_none());
         assert_eq!(exec_line("niri-session %U"), "niri-session");
+    }
+
+    #[test]
+    fn login_defs_set_the_user_ids() {
+        assert_eq!(login_defs_range("# UID_MIN 5\nUID_MIN\t\t 2000\nUID_MAX 3000\n"), 2000..=3000);
+        assert_eq!(login_defs_range(""), 1000..=60000);
     }
 }

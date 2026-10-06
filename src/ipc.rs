@@ -3,7 +3,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -20,6 +19,22 @@ pub struct State {
     #[serde(default)]
     pub workspaces: Vec<WorkspaceInfo>,
     pub locked: bool,
+    /// the shell is keeping the screen awake
+    #[serde(default)]
+    pub caffeine: bool,
+    /// an app is keeping the screen awake like a video
+    #[serde(default)]
+    pub inhibited: bool,
+    /// something copied the screen in the last couple secs
+    #[serde(default)]
+    pub capturing: bool,
+    /// night light is warming the screen right now
+    #[serde(default)]
+    pub night_light: bool,
+    #[serde(default)]
+    pub night_light_enabled: bool,
+    #[serde(default)]
+    pub anti_flashbang: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -99,6 +114,21 @@ pub fn socket_path() -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
+thread_local! {
+    /// the newest state from the subscription so toggles know whats on
+    static LATEST: std::cell::RefCell<Option<State>> = const { std::cell::RefCell::new(None) };
+}
+
+/// remember the newest state from sevenwm
+pub fn set_latest(state: &State) {
+    LATEST.with(|l| *l.borrow_mut() = Some(state.clone()));
+}
+
+/// the newest state from sevenwm if one came yet
+pub fn latest() -> Option<State> {
+    LATEST.with(|l| l.borrow().clone())
+}
+
 /// send one request and read its reply
 pub fn request(request: Value) -> Result<Value, String> {
     let path = socket_path().ok_or("sevenwm isn't running")?;
@@ -137,8 +167,8 @@ pub fn fly_to(x: f64, y: f64) {
 }
 
 /// follow sevenwms state from a background thread and reconnect when it drops
-pub fn subscribe() -> Receiver<State> {
-    let (send, receive) = channel();
+pub fn subscribe() -> crate::wake::Receiver<State> {
+    let (send, receive) = crate::wake::channel();
     std::thread::spawn(move || {
         loop {
             follow(&send);
@@ -148,7 +178,7 @@ pub fn subscribe() -> Receiver<State> {
     receive
 }
 
-fn follow(send: &Sender<State>) {
+fn follow(send: &crate::wake::Sender<State>) {
     let Some(path) = socket_path() else {
         return;
     };
@@ -167,7 +197,7 @@ fn follow(send: &Sender<State>) {
         };
         if let Some(state) = message.get("state")
             && let Ok(state) = serde_json::from_value::<State>(state.clone())
-            && send.send(state).is_err()
+            && send.unbounded_send(state).is_err()
         {
             std::process::exit(0);
         }

@@ -14,25 +14,26 @@ use crate::ipc;
 
 pub const CSS: &str = "
 .notifications { background: transparent; }
-.notifications * {
-    font-family: \"Adwaita Sans\", \"Symbols Nerd Font\", sans-serif;
-    font-size: 13px;
-    color: #ffffff;
-}
+.notifications * { font-size: 13px; color: @m3onSurface; }
 .notifications .card {
-    background: #000000;
-    border: 1px solid #ffffff;
-    border-radius: 7px;
-    padding: 12px 14px;
+    background: @m3surfaceContainer;
+    border-radius: 20px;
+    padding: 14px 16px;
+    border: 1px solid alpha(@m3outlineVariant, 0.35);
 }
-.notifications .card.critical { border-width: 2px; }
-.notifications .app { font-size: 11px; font-weight: bold; }
-.notifications .summary { font-size: 14px; font-weight: bold; }
+.notifications .card.critical { background: @m3errorContainer; }
+.notifications .card.critical label { color: @m3onErrorContainer; }
+.notifications .app { font-size: 11px; font-weight: 500; color: @m3primary; }
+.notifications .summary { font-size: 14px; font-weight: 500; }
+.notifications .body { color: @m3onSurfaceVariant; }
 .notifications button {
-    background: #000000; border: 1px solid #000000; box-shadow: none;
-    border-radius: 4px; padding: 4px 8px; min-height: 0;
+    background: @m3surfaceContainerHigh;
+    border: none; box-shadow: none;
+    border-radius: 9999px; padding: 5px 14px; min-height: 0;
+    transition: background 150ms cubic-bezier(0.2, 0, 0, 1);
 }
-.notifications button:hover { border: 1px dashed #ffffff; }
+.notifications button:hover { background: @m3secondaryContainer; }
+.notifications button:hover label { color: @m3onSecondaryContainer; }
 ";
 
 const INTROSPECTION: &str = r#"
@@ -100,6 +101,8 @@ pub struct Notification {
     pub desktop_entry: Option<String>,
     /// the process that sent it
     pub pid: Option<u32>,
+    /// icon is a picture we saved from raw pixels so its ours to delete
+    pub owned_image: bool,
 }
 
 pub struct Notifications {
@@ -118,6 +121,7 @@ impl Notifications {
         window.set_namespace(Some("notifications"));
         window.set_layer(Layer::Overlay);
         window.add_css_class("notifications");
+        crate::style::adopt(&window);
         let stack = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         window.set_child(Some(&stack));
 
@@ -281,6 +285,7 @@ impl Notifications {
                     .find_map(|key| hints.get(*key))
                     .and_then(|p| p.get::<String>())
                     .filter(|p| !p.is_empty());
+                let owned_image = image_data.is_some();
                 let icon = image_data
                     .or(image_path)
                     .unwrap_or(icon);
@@ -323,6 +328,7 @@ impl Notifications {
                         .unwrap_or_else(|_| glib::DateTime::now_utc().unwrap()),
                     desktop_entry,
                     pid,
+                    owned_image,
                 };
                 invocation.return_value(Some(&(id,).to_variant()));
                 self.show(notification, timeout);
@@ -432,6 +438,7 @@ impl Notifications {
             } else {
                 body.set_text(&n.body);
             }
+            body.add_css_class("body");
             body.set_xalign(0.0);
             body.set_wrap(true);
             body.set_max_width_chars(40);
@@ -579,16 +586,13 @@ impl Notifications {
         self.write_history();
     }
 
-    /// delete saved pictures of notifications that left the history unless one still uses the file
+    /// delete pictures we saved for notifications that left the history unless one still uses the file
+    /// and only ours bc any app can put any path in its icon
     fn forget_images(&self, dropped: &[Notification]) {
-        let Some(dir) = images_dir() else {
-            return;
-        };
         let history = self.history.borrow();
         for n in dropped {
-            let path = std::path::Path::new(&n.icon);
-            if path.starts_with(&dir) && !history.iter().any(|h| h.icon == n.icon) {
-                let _ = std::fs::remove_file(path);
+            if n.owned_image && !history.iter().any(|h| h.icon == n.icon) {
+                let _ = std::fs::remove_file(&n.icon);
             }
         }
     }

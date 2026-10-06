@@ -2,16 +2,71 @@
 # anything u leave out keeps the value here and changes apply within a sec
 
 [bar]
-# modules in order are desktop clock audio network perf power battery title and minimap
-left = ["desktop"]
+# which edge its on top bottom left or right and on the sides it only shows icons
+position = "top"
+# tucked away till the mouse touches that edge
+autohide = false
+# a rounded bar w a gap around it instead of one that fills the edge
+floating = false
+# 0 see thru to 1 solid
+opacity = 1.0
+# how tall the bar is in px or how wide on the sides and its icons and text grow or shrink w it
+height = 36
+# modules in order are desktop clock audio network perf power battery title minimap cava media weather
+# updates privacy caffeine dnd nightlight antiflash clipboard session quick and ur own as custom/name
+# the clock opens quick settings and the ones that have nothing to show like updates hide
+left = ["desktop", "media"]
 center = []
-right = ["clock", "audio", "network", "perf", "power"]
+right = ["privacy", "updates", "weather", "clock", "audio", "network", "perf", "power"]
 # strftime style like glib does it
 clock_format = "%H:%M %m/%d/%y"
 # what the desktop button starts
 terminal = "kitty"
 # the dropdown trays from clicking audio network perf and power
-tray = "~/.config/waybar/scripts/tray.py"
+tray = "sevenshell tray"
+# how many bars the cava module draws
+cava_bars = 12
+
+# ur own modules show what a command prints and go in left center or right as custom/name
+# interval is seconds between runs and 0 keeps it running and shows each line it prints
+# a line of waybar style json w text and tooltip works too
+# [[bar.custom]]
+# name = "uptime"
+# exec = "uptime -p"
+# interval = 60
+# on_click = "kitty htop"
+# icon = "timer"
+
+[weather]
+# a city like "Toronto" or empty to guess from ur ip thru wttr.in
+location = ""
+# metric or imperial
+units = "metric"
+
+[launcher]
+# the last row searches the web w %s as what u typed
+search_url = "https://duckduckgo.com/?q=%s"
+# typing math like 2*8 or =sqrt(2) shows the answer and enter copies it
+calculator = true
+
+[clipboard]
+# keeps what u copy thru cliphist so mod+v brings old things back
+history = true
+max_items = 500
+
+[wallpapers]
+# drop pictures here and they show up in quick settings and each one remembers its colors
+dir = "~/Pictures/Wallpapers"
+
+[updates]
+# what clicking the updates module runs
+command = "kitty -e sh -c 'yay -Syu || sudo pacman -Syu; echo; read -rp \"done so press enter \" _'"
+# how often to check in minutes
+interval_minutes = 60
+
+[polkit]
+# asks for ur password when an app needs admin rights like a system setting
+agent = true
 
 [notifications]
 # only critical notifications pop up and the rest go to history
@@ -51,3 +106,28 @@ date_format = "%A, %B %d, %Y"
 message = "Press any key"
 # lock whenever the computer goes to sleep
 lock_before_sleep = true
+
+[drives]
+# usb sticks and external drives mount on their own thru udiskie and show up in ur file manager
+automount = true
+
+[theme]
+# where the colors come from which is wallpaper or a seed color like #6750a4
+source = "wallpaper"
+# the image for wallpaper and empty uses sevenwms wallpaper
+wallpaper = ""
+# content keeps the wallpapers real colors so a black and white one stays black and white
+# or tonal-spot vibrant expressive fidelity neutral monochrome rainbow or fruit-salad
+variant = "content"
+# dark or light
+mode = "dark"
+# ur own accent colors like "#ff8800" or empty to let the palette pick
+primary = ""
+secondary = ""
+tertiary = ""
+# also color sevenwms borders menus and title bars w the palette
+color_sevenwm = true
+# color gtk apps own top bars to match and it only touches gtk css files sevenshell made
+color_gtk = true
+# exact colors that win over the palette by role like { m3onSurface = "#ffffff" } and settings lists them all
+colors = {}

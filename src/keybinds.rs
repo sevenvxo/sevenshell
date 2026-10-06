@@ -1,37 +1,12 @@
-//! the keybind cheat sheet on mod+/ read from sevenwms ipc and escape or a click closes it
+//! the keybind search on mod+/ that looks like the launcher where u type what u want to do and enter does it
 
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{gdk, glib};
-use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use serde_json::json;
 
 use crate::ipc;
-
-pub const CSS: &str = "
-.keybinds { background: rgba(0, 0, 0, 0.55); }
-.keybinds * {
-    font-family: \"Adwaita Sans\", \"Symbols Nerd Font\", sans-serif;
-    font-size: 13px;
-    color: #ffffff;
-}
-.keybinds .panel {
-    background: #000000;
-    border: 1px solid #ffffff;
-    border-radius: 7px;
-    padding: 18px 22px;
-}
-.keybinds .title { font-size: 16px; font-weight: bold; }
-.keybinds .hint { font-size: 12px; }
-.keybinds .divider { background: #ffffff; min-height: 1px; margin: 10px 0 12px 0; }
-.keybinds .section { font-weight: bold; margin: 8px 0 4px 0; }
-.keybinds .key {
-    border: 1px solid #ffffff; border-radius: 4px;
-    padding: 0 5px; font-size: 12px;
-}
-.keybinds .or { font-size: 12px; margin: 0 2px; }
-";
+use crate::picker::{Look, Picker, Row, Source, is_subsequence};
 
 /// the sections in the order theyre shown maybe
 const SECTIONS: [&str; 8] = [
@@ -44,6 +19,21 @@ const SECTIONS: [&str; 8] = [
     "Media",
     "Mouse",
 ];
+
+/// a material symbols icon for each section
+fn section_icon(section: &str) -> &'static str {
+    match section {
+        "Apps" => "apps",
+        "Windows" => "select_window",
+        "Tiling" => "dashboard",
+        "Workspaces" => "view_quilt",
+        "View" => "zoom_in",
+        "Move & resize" => "open_with",
+        "Media" => "music_note",
+        "Mouse" => "mouse",
+        _ => "keyboard",
+    }
+}
 
 /// mouse controls arent keybinds so they come from sevenwm
 fn mouse_rows(pan: &str, workspace_drag: &str) -> Vec<(String, &'static str)> {
@@ -58,207 +48,166 @@ fn mouse_rows(pan: &str, workspace_drag: &str) -> Vec<(String, &'static str)> {
     ]
 }
 
-pub struct Keybinds {
-    pub window: gtk4::ApplicationWindow,
+pub type Keybinds = Picker<Actions>;
+
+/// one thing u can do w the keys that do it
+struct Action {
+    section: &'static str,
+    text: String,
+    keys: Vec<String>,
+    /// the sevenwm action to run or none for mouse things
+    run: Option<String>,
+    /// text keys and action lowercased for searching
+    search: String,
+}
+
+pub struct Actions {
+    all: Vec<Action>,
 }
 
 impl Keybinds {
     pub fn new(app: &gtk4::Application) -> Rc<Self> {
-        let window = gtk4::ApplicationWindow::new(app);
-        window.init_layer_shell();
-        window.set_namespace(Some("keybinds"));
-        window.set_layer(Layer::Overlay);
-        window.set_keyboard_mode(KeyboardMode::Exclusive);
-        // cover the screen so a click anywhere closes it
-        for edge in [
-            gtk4_layer_shell::Edge::Top,
-            gtk4_layer_shell::Edge::Bottom,
-            gtk4_layer_shell::Edge::Left,
-            gtk4_layer_shell::Edge::Right,
-        ] {
-            window.set_anchor(edge, true);
-        }
-        window.add_css_class("keybinds");
-
-        let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        panel.add_css_class("panel");
-        panel.set_halign(gtk4::Align::Center);
-        panel.set_valign(gtk4::Align::Center);
-
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        let title = gtk4::Label::new(Some("Keybinds"));
-        title.add_css_class("title");
-        title.set_xalign(0.0);
-        title.set_hexpand(true);
-        let hint = gtk4::Label::new(None);
-        hint.add_css_class("hint");
-        header.append(&title);
-        header.append(&hint);
-        panel.append(&header);
-        let divider = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        divider.add_css_class("divider");
-        panel.append(&divider);
-
-        match ipc::request(json!({ "get": "bindings" })) {
-            Ok(reply) => {
-                let mod_key = reply["mod"].as_str().unwrap_or("super").to_string();
-                hint.set_text(&format!("mod = {}  ·  Esc to close", key_name(&mod_key)));
-                let bindings: Vec<(String, String)> = reply["bindings"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|b| {
-                        Some((b["keys"].as_str()?.to_string(), b["action"].as_str()?.to_string()))
-                    })
-                    .collect();
-                let mouse = mouse_rows(
-                    reply["mouse"]["pan"].as_str().unwrap_or("mod+alt"),
-                    reply["mouse"]["workspace_drag"].as_str().unwrap_or("mod+ctrl"),
-                );
-                let (width, height) = screen_size();
-                // each column wants about 400px
-                let count = ((width - 120) / 400).clamp(1, 3) as usize;
-                let scroll = gtk4::ScrolledWindow::new();
-                scroll.set_hscrollbar_policy(gtk4::PolicyType::Never);
-                scroll.set_propagate_natural_height(true);
-                scroll.set_propagate_natural_width(true);
-                scroll.set_max_content_height(height - 160);
-                scroll.set_child(Some(&columns(&bindings, &mouse, count)));
-                panel.append(&scroll);
-            }
-            Err(err) => {
-                hint.set_text("Esc to close");
-                let label = gtk4::Label::new(Some(&format!("Can't ask sevenwm: {err}")));
-                label.set_xalign(0.0);
-                panel.append(&label);
-            }
-        }
-        window.set_child(Some(&panel));
-
-        let keybinds = Rc::new(Self { window });
-        let keys = gtk4::EventControllerKey::new();
-        let window = keybinds.window.clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
-            if key == gdk::Key::Escape {
-                window.close();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        keybinds.window.add_controller(keys);
-        let click = gtk4::GestureClick::new();
-        let window = keybinds.window.clone();
-        click.connect_released(move |_, _, _, _| window.close());
-        keybinds.window.add_controller(click);
-        keybinds
-    }
-
-    pub fn show(&self) {
-        self.window.present();
+        let (all, mod_key) = match ipc::request(json!({ "get": "bindings" })) {
+            Ok(reply) => (actions(&reply), reply["mod"].as_str().unwrap_or("super").to_string()),
+            Err(_) => (Vec::new(), "super".into()),
+        };
+        let hint: &'static str = Box::leak(
+            format!("mod = {} · Enter does it · Esc closes", key_name(&mod_key)).into_boxed_str(),
+        );
+        let look = Look {
+            namespace: "keybinds",
+            width: 640,
+            placeholder: Some("What do you want to do?"),
+            empty: "No keybind does that",
+            detail: false,
+            hint: Some(hint),
+        };
+        Picker::build(app, look, Actions { all })
     }
 }
 
-/// one row w a description and the keys that do it
-struct Row {
-    section: &'static str,
-    text: String,
-    keys: Vec<String>,
-}
-
-/// the active monitor size in sevenwms logical pixels
-fn screen_size() -> (i32, i32) {
-    ipc::request(json!({ "get": "state" }))
-        .ok()
-        .and_then(|state| serde_json::from_value::<ipc::State>(state).ok())
-        .and_then(|state| {
-            let active = state.active_monitor.clone()?;
-            state.monitor(&active).map(|m| (m.size[0], m.size[1]))
-        })
-        .unwrap_or((1920, 1080))
-}
-
-/// lay the sections into count columns each into the shortest so far
-fn columns(bindings: &[(String, String)], mouse: &[(String, &str)], count: usize) -> gtk4::Box {
-    let mut rows: Vec<Row> = Vec::new();
-    for (keys, action) in bindings {
+/// every bind from sevenwm plus the mouse ones grouped so binds doing the same share a row
+fn actions(reply: &serde_json::Value) -> Vec<Action> {
+    let bindings: Vec<(String, String)> = reply["bindings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| Some((b["keys"].as_str()?.to_string(), b["action"].as_str()?.to_string())))
+        .collect();
+    let mut rows: Vec<Action> = Vec::new();
+    for (keys, action) in &bindings {
         let (section, text) = describe(action);
-        // binds that do the same thing share a row
+        // workspace n and the like run w their own number so they only share a row not an action
+        let runnable = !matches!(action.split_whitespace().next(), Some("workspace" | "move-to-workspace"));
         match rows.iter_mut().find(|r| r.text == text && r.section == section) {
             Some(row) => row.keys.push(keys.clone()),
-            None => rows.push(Row {
+            None => rows.push(Action {
                 section,
                 text,
                 keys: vec![keys.clone()],
+                run: runnable.then(|| action.clone()),
+                search: String::new(),
             }),
         }
     }
+    let mouse = mouse_rows(
+        reply["mouse"]["pan"].as_str().unwrap_or("mod+alt"),
+        reply["mouse"]["workspace_drag"].as_str().unwrap_or("mod+ctrl"),
+    );
     for (keys, text) in mouse {
-        rows.push(Row {
+        rows.push(Action {
             section: "Mouse",
             text: text.to_string(),
-            keys: vec![keys.clone()],
+            keys: vec![keys],
+            run: None,
+            search: String::new(),
         });
     }
     for row in &mut rows {
         // letters before arrows and fewer modifiers first maybe
-        row.keys
-            .sort_by_key(|k| (k.matches('+').count(), is_arrow(k), k.clone()));
+        row.keys.sort_by_key(|k| (k.matches('+').count(), is_arrow(k), k.clone()));
         row.keys = squash_digits(&row.keys);
+        row.search = format!(
+            "{} {} {} {}",
+            row.text,
+            row.section,
+            row.keys.iter().map(|k| k.split('+').map(key_name).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" "),
+            row.run.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
     }
-
-    let outer = gtk4::Box::new(gtk4::Orientation::Horizontal, 36);
-    let cols: Vec<gtk4::Box> = (0..count)
-        .map(|_| {
-            let col = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            col.set_valign(gtk4::Align::Start);
-            outer.append(&col);
-            col
-        })
-        .collect();
-    let mut heights = vec![0usize; count];
-    for section in SECTIONS {
-        let items: Vec<&Row> = rows.iter().filter(|r| r.section == section).collect();
-        if items.is_empty() {
-            continue;
-        }
-        // into the shortest column so far
-        let i = (0..count).min_by_key(|&i| heights[i]).unwrap_or(0);
-        heights[i] += items.len() + 2;
-        let heading = gtk4::Label::new(Some(section));
-        heading.add_css_class("section");
-        heading.set_xalign(0.0);
-        cols[i].append(&heading);
-        let grid = gtk4::Grid::new();
-        grid.set_row_spacing(4);
-        grid.set_column_spacing(16);
-        for (r, row) in items.iter().enumerate() {
-            let text = gtk4::Label::new(Some(&row.text));
-            text.set_xalign(0.0);
-            text.set_hexpand(true);
-            grid.attach(&text, 0, r as i32, 1, 1);
-            grid.attach(&keys_box(&row.keys), 1, r as i32, 1, 1);
-        }
-        cols[i].append(&grid);
-    }
-    outer
+    rows.sort_by_key(|r| SECTIONS.iter().position(|s| *s == r.section).unwrap_or(SECTIONS.len()));
+    rows
 }
 
-fn keys_box(combos: &[String]) -> gtk4::Box {
-    let b = gtk4::Box::new(gtk4::Orientation::Horizontal, 3);
-    b.set_halign(gtk4::Align::End);
-    for (i, combo) in combos.iter().enumerate() {
-        if i > 0 {
-            let or = gtk4::Label::new(Some("or"));
-            or.add_css_class("or");
-            b.append(&or);
+impl Source for Actions {
+    fn len(&self) -> usize {
+        self.all.len()
+    }
+
+    fn rank(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return (0..self.all.len()).collect();
         }
-        for part in combo.split('+') {
-            let key = gtk4::Label::new(Some(&key_name(part)));
-            key.add_css_class("key");
-            b.append(&key);
+        let mut ranked: Vec<(u32, usize)> = self
+            .all
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| {
+                let text = a.text.to_lowercase();
+                let score = if text.starts_with(query) {
+                    100
+                } else if text.split_whitespace().any(|w| w.starts_with(query)) {
+                    80
+                } else if text.contains(query) {
+                    60
+                } else if a.search.contains(query) {
+                    40
+                } else if is_subsequence(query, &text) {
+                    20
+                } else {
+                    return None;
+                };
+                Some((score, i))
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.into_iter().map(|(_, i)| i).collect()
+    }
+
+    fn fill(&self, index: usize, row: &Row) {
+        let a = &self.all[index];
+        row.icon.set_visible(false);
+        row.glyph.set_visible(true);
+        row.glyph.add_css_class("icon");
+        row.glyph.set_text(section_icon(a.section));
+        row.name.set_text(&a.text);
+        while let Some(child) = row.keys.first_child() {
+            row.keys.remove(&child);
+        }
+        for (i, combo) in a.keys.iter().take(2).enumerate() {
+            if i > 0 {
+                let or = gtk4::Label::new(Some("or"));
+                or.add_css_class("or");
+                row.keys.append(&or);
+            }
+            for part in combo.split('+') {
+                let key = gtk4::Label::new(Some(&key_name(part)));
+                key.add_css_class("key");
+                row.keys.append(&key);
+            }
+        }
+        row.keys.set_visible(true);
+    }
+
+    fn pick(&self, index: usize, window: &gtk4::ApplicationWindow) {
+        let action = self.all[index].run.clone();
+        window.close();
+        // after closing so the action lands on the window u were on and not this search
+        if let Some(action) = action {
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || ipc::action(&action));
         }
     }
-    b
 }
 
 /// mod+1 thru mod+0 become one row so the ten workspace keys fit on one line
@@ -310,6 +259,14 @@ fn key_name(key: &str) -> String {
         "up" => "↑",
         "down" => "↓",
         "slash" => "/",
+        "period" => ".",
+        "comma" => ",",
+        "semicolon" => ";",
+        "apostrophe" => "'",
+        "grave" => "`",
+        "backspace" => "Backspace",
+        "delete" => "Del",
+        "print" => "PrtSc",
         "space" => "Space",
         "return" => "Enter",
         "escape" => "Esc",
@@ -360,6 +317,9 @@ fn describe(action: &str) -> (&'static str, String) {
         "home" => ("View", "Back to the home workspace".into()),
         "overview" => ("View", "Overview".into()),
         "center-window" => ("View", "Centre window at 100% zoom".into()),
+        "origin" => ("View", "Back to 0 0".into()),
+        "window-to-origin" => ("Windows", "Move window to 0 0".into()),
+        "workspace-to-origin" => ("Workspaces", "Move workspace to 0 0".into()),
         "zoom-in" => ("View", "Zoom in".into()),
         "zoom-out" => ("View", "Zoom out".into()),
         "workspace" => ("Workspaces", "Go to workspace 1–10".into()),
@@ -380,7 +340,12 @@ fn describe_exec(command: &str) -> (&'static str, String) {
     let c = command.trim();
     let known: &[(&str, &str, &str)] = &[
         ("sevenshell launcher", "Apps", "App launcher"),
-        ("sevenshell keybinds", "Apps", "These keybinds"),
+        ("sevenshell keybinds", "Apps", "Search keybinds"),
+        ("sevenshell clipboard", "Apps", "Clipboard history"),
+        ("sevenshell emoji", "Apps", "Emoji picker"),
+        ("sevenshell quick", "Apps", "Quick settings"),
+        ("sevenshell session", "Apps", "Lock, log out, restart or shut down"),
+        ("sevenshell screenshot", "Apps", "Screenshot"),
         ("sevenshell windows", "Windows", "Window search"),
         ("sevenshell lock", "Apps", "Lock screen"),
         ("sevenshell volume up", "Media", "Volume up"),
@@ -393,7 +358,10 @@ fn describe_exec(command: &str) -> (&'static str, String) {
         ("playerctl next", "Media", "Next track"),
         ("playerctl previous", "Media", "Previous track"),
         ("sevenwm-settings", "Apps", "Settings"),
+        ("sevenshell settings", "Apps", "Settings"),
+        ("sevenshell taskmanager", "Apps", "Task manager"),
         ("default-web-browser", "Apps", "Web browser"),
+        ("inode/directory", "Apps", "Files"),
         ("kitty", "Apps", "Terminal"),
         ("foot", "Apps", "Terminal"),
         ("alacritty", "Apps", "Terminal"),
